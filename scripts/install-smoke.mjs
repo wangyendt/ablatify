@@ -6,18 +6,19 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const expectedVersion = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmExecPath = process.env.npm_execpath;
+if (!npmExecPath) throw new Error("run this check through `npm run install:smoke`");
 const prefix = mkdtempSync(path.join(tmpdir(), "ablatify-install-"));
 let tarball;
 try {
   const packed = JSON.parse(
-    execFileSync(npm, ["pack", "--json", "--ignore-scripts"], {
+    execFileSync(process.execPath, [npmExecPath, "pack", "--json", "--ignore-scripts"], {
       cwd: root,
       encoding: "utf8",
     }),
   )[0];
   tarball = path.join(root, packed.filename);
-  execFileSync(npm, ["install", "--prefix", prefix, "--ignore-scripts", tarball], {
+  execFileSync(process.execPath, [npmExecPath, "install", "--prefix", prefix, "--ignore-scripts", tarball], {
     stdio: "pipe",
   });
   const executable = path.join(

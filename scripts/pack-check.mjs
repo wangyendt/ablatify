@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmExecPath = process.env.npm_execpath;
+if (!npmExecPath) throw new Error("run this check through `npm run pack:check`");
 const metadata = JSON.parse(
-  execFileSync(npm, ["pack", "--json", "--dry-run", "--ignore-scripts"], {
+  execFileSync(process.execPath, [npmExecPath, "pack", "--json", "--dry-run", "--ignore-scripts"], {
     encoding: "utf8",
   }),
 )[0];
