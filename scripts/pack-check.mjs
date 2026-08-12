@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const metadata = JSON.parse(
-  execFileSync("npm", ["pack", "--json", "--dry-run", "--ignore-scripts"], {
+  execFileSync(npm, ["pack", "--json", "--dry-run", "--ignore-scripts"], {
     encoding: "utf8",
   }),
 )[0];
@@ -45,4 +46,3 @@ for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
 }
 
 process.stdout.write(`npm pack check passed (${files.size} files, ${metadata.size} bytes).\n`);
-
