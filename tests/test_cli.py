@@ -25,7 +25,8 @@ def run_ablatify(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]
         [sys.executable, "-m", "ablatify", *args],
         cwd=tmp_path,
         env=env,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )

@@ -32,7 +32,8 @@ class ProviderResult:
 def _run_engine(script: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(script), *arguments],
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
@@ -604,6 +605,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
         return _status()
