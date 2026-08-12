@@ -30,6 +30,9 @@ permissions:
   actions: write
   contents: write
 
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   bump:
     if: >-

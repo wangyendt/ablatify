@@ -20,6 +20,9 @@ permissions:
   contents: write
   id-token: write
 
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   publish:
     if: ${{ vars.AUTO_PUBLISH_NPM == 'true' }}
