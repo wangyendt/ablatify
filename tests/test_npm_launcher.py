@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +23,8 @@ def test_node_launcher_runs_the_python_cli() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "ablatify 0.1.0"
+    package = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
+    assert result.stdout.strip() == f"ablatify {package['version']}"
 
 
 def test_node_launcher_explains_an_invalid_python_override() -> None:
