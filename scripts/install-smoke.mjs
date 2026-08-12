@@ -26,7 +26,13 @@ try {
     ".bin",
     process.platform === "win32" ? "ablatify.cmd" : "ablatify",
   );
-  const output = execFileSync(executable, ["--version"], { encoding: "utf8" }).trim();
+  const output = (
+    process.platform === "win32"
+      ? execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${executable}" --version`], {
+          encoding: "utf8",
+        })
+      : execFileSync(executable, ["--version"], { encoding: "utf8" })
+  ).trim();
   if (output !== `ablatify ${expectedVersion}`) {
     throw new Error(`unexpected installed CLI version: ${output}`);
   }
