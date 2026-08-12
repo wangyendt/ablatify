@@ -42,7 +42,7 @@
     "test:upstream": "python -m pytest -q vendor/claude-keysmith/tests vendor/codex-keysmith/tests",
     "pack:check": "node scripts/pack-check.mjs",
     "install:smoke": "node scripts/install-smoke.mjs",
-    "verify": "npm test && npm run pack:check && npm run install:smoke",
+    "verify": "npm run pack:check && npm run install:smoke && npm test",
     "prepublishOnly": "npm run verify"
   },
   "keywords": [

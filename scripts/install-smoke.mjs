@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -29,8 +29,9 @@ try {
   );
   const output = (
     process.platform === "win32"
-      ? execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${executable}" --version`], {
+      ? execSync(`"${executable}" --version`, {
           encoding: "utf8",
+          shell: process.env.ComSpec || "cmd.exe",
         })
       : execFileSync(executable, ["--version"], { encoding: "utf8" })
   ).trim();
