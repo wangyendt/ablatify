@@ -1,0 +1,77 @@
+name: Bump patch on main
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - bin/**
+      - src/**
+      - vendor/codex-keysmith/codex-instruct.py
+      - vendor/codex-keysmith/examples/**
+      - vendor/codex-keysmith/LICENSE
+      - vendor/codex-keysmith/VERSION
+      - vendor/claude-keysmith/claude-instruct.py
+      - vendor/claude-keysmith/examples/**
+      - vendor/claude-keysmith/LICENSE
+      - package.json
+      - package-lock.json
+      - .npmignore
+      - README.md
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+      - UPSTREAMS.md
+  workflow_dispatch:
+
+concurrency:
+  group: ablatify-release-main
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  bump:
+    if: >-
+      ${{ vars.AUTO_PUBLISH_NPM == 'true' && !startsWith(github.event.head_commit.message || '', 'chore(release): v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: npm ci --ignore-scripts
+      - run: npm run verify
+      - run: npm version patch --no-git-tag-version
+      - run: node scripts/sync-version.mjs
+
+      - name: Commit release version
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          version=$(node -p "require('./package.json').version")
+          git add package.json package-lock.json src/ablatify/__init__.py
+          git commit -m "chore(release): v${version}"
+          git push origin HEAD:main
+
+      - name: Dispatch trusted npm publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          sha=$(git rev-parse HEAD)
+          gh workflow run publish-npm.yml --ref main \
+            -f expected_sha="$sha" \
+            -f expected_version="$version"

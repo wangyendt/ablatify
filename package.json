@@ -1,0 +1,55 @@
+{
+  "name": "ablatify",
+  "version": "0.1.0",
+  "description": "Unified instruction profiles for Codex and Claude",
+  "license": "MIT",
+  "author": "ye.wang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangyendt/ablatify.git"
+  },
+  "homepage": "https://github.com/wangyendt/ablatify#readme",
+  "bugs": "https://github.com/wangyendt/ablatify/issues",
+  "bin": {
+    "ablatify": "bin/ablatify.js"
+  },
+  "files": [
+    "bin/",
+    "src/ablatify/__init__.py",
+    "src/ablatify/__main__.py",
+    "src/ablatify/cli.py",
+    "vendor/codex-keysmith/codex-instruct.py",
+    "vendor/codex-keysmith/examples/",
+    "vendor/codex-keysmith/LICENSE",
+    "vendor/codex-keysmith/VERSION",
+    "vendor/claude-keysmith/claude-instruct.py",
+    "vendor/claude-keysmith/examples/",
+    "vendor/claude-keysmith/LICENSE",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "UPSTREAMS.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "npm run test:unit && npm run test:upstream",
+    "test:unit": "python -m pytest -q tests",
+    "test:upstream": "python -m pytest -q vendor/claude-keysmith/tests vendor/codex-keysmith/tests",
+    "pack:check": "node scripts/pack-check.mjs",
+    "install:smoke": "node scripts/install-smoke.mjs",
+    "verify": "npm test && npm run pack:check && npm run install:smoke",
+    "prepublishOnly": "npm run verify"
+  },
+  "keywords": [
+    "codex",
+    "claude",
+    "instructions",
+    "cli",
+    "prompt"
+  ]
+}

@@ -1,0 +1,67 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact release commit to publish
+        required: true
+        type: string
+      expected_version:
+        description: Exact npm version to publish
+        required: true
+        type: string
+
+concurrency:
+  group: ablatify-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    if: ${{ vars.AUTO_PUBLISH_NPM == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.expected_sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: npm install --global npm@11.8.0
+      - run: python -m pip install -r requirements-dev.txt
+      - run: npm ci --ignore-scripts
+      - run: npm run verify
+
+      - name: Verify immutable release identity
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_sha }}"
+          test "$(node -p "require('./package.json').version")" = "${{ inputs.expected_version }}"
+          test "$(python -c "import sys; sys.path.insert(0, 'src'); import ablatify; print(ablatify.__version__)")" = "${{ inputs.expected_version }}"
+          if npm view "ablatify@${{ inputs.expected_version }}" version >/dev/null 2>&1; then
+            echo "ablatify@${{ inputs.expected_version }} already exists; refusing to republish."
+            exit 1
+          fi
+
+      - run: npm publish --access public --provenance
+
+      - name: Create annotated release tag
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          tag="v${{ inputs.expected_version }}"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
