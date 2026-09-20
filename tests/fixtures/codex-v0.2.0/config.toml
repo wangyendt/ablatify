@@ -1,0 +1,2 @@
+model = "gpt-5"
+model_instructions_file = "./gpt-unrestricted.md"

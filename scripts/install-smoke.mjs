@@ -38,6 +38,15 @@ try {
   if (output !== `ablatify ${expectedVersion}`) {
     throw new Error(`unexpected installed CLI version: ${output}`);
   }
+  const installedCli = path.join(prefix, "node_modules", "ablatify", "bin", "ablatify.js");
+  for (const [args, expected] of [
+    [["codex", "--", "--scenario-list"], "example_fixture"],
+    [["codex", "--", "--scaffold-list"], "pytest_complete"],
+    [["claude", "--", "--version"], "claude-keysmith v7.2"],
+  ]) {
+    const result = execFileSync(process.execPath, [installedCli, ...args], { encoding: "utf8" });
+    if (!result.includes(expected)) throw new Error(`installed resource check failed: ${args.join(" ")}`);
+  }
   process.stdout.write(`installed tarball smoke test passed: ${output}\n`);
 } finally {
   if (tarball) rmSync(tarball, { force: true });

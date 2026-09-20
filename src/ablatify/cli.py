@@ -32,6 +32,7 @@ class ProviderResult:
 def _run_engine(script: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(script), *arguments],
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
         encoding="utf-8",
         errors="replace",
         capture_output=True,
@@ -143,6 +144,10 @@ def _status(
         else:
             details = result.details if isinstance(result.details, dict) else {}
             installed = installed and details.get("installed") is True
+            recovery = details.get("recovery_state", {})
+            installed = installed and not recovery.get("recovery_required", False)
+            if runtime:
+                installed = installed and details.get("runtime_readiness", {}).get("runtime_ready") is True
     if output_format == "json":
         status_ok = successful and (installed or not check)
         payload = {
@@ -479,20 +484,50 @@ def _doctor(options: argparse.Namespace) -> int:
 
 
 def _recover(options: argparse.Namespace) -> int:
+    if options.target == "claude":
+        if options.codex_dir:
+            raise ValueError("--codex-dir only applies to Codex")
+        return _claude_maintenance(options, "recover")
+    if options.scope or options.project_dir:
+        raise ValueError("--scope and --project-dir only apply to Claude")
     codex_dir = options.codex_dir or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
-    arguments = ["--recover", "--codex-dir", codex_dir, "--lang", "en"]
-    if options.yes and not options.dry_run:
+    apply = options.yes and not options.dry_run
+    arguments = ["--" + options.command, "--codex-dir", codex_dir, "--lang", "en"]
+    if apply:
         arguments.append("--yes")
     process = _run_engine(CODEX_ENGINE, arguments)
     result = ProviderResult(
         provider="codex",
         exitCode=process.returncode,
-        outcome="applied" if options.yes and process.returncode == 0 else "previewed" if process.returncode == 0 else "error",
+        outcome="applied" if apply and process.returncode == 0 else "previewed" if process.returncode == 0 else "error",
         path=codex_dir,
         stdout=process.stdout,
         stderr=process.stderr,
     )
-    return _print_operation("recover", {"codex": result}, options.format)
+    return _print_operation(options.command, {"codex": result}, options.format, verbose=True)
+
+
+def _claude_maintenance(options: argparse.Namespace, command: str) -> int:
+    arguments = [command, "--scope", options.scope or "user"]
+    if options.format == "json":
+        arguments.append("--json")
+    if options.project_dir:
+        arguments.extend(["--project-dir", options.project_dir])
+    apply = command == "recover" and options.yes and not options.dry_run
+    if apply:
+        arguments.append("--yes")
+    process = _run_engine(CLAUDE_ENGINE, arguments)
+    try:
+        details = json.loads(process.stdout)
+    except json.JSONDecodeError:
+        details = None
+    result = ProviderResult(
+        provider="claude", exitCode=process.returncode,
+        outcome="error" if process.returncode else "checked" if command == "backups" else "applied" if apply else "previewed",
+        path=str(Path.home() / ".claude") if (options.scope or "user") == "user" else str(Path(options.project_dir or os.getcwd()).resolve()),
+        stdout=process.stdout, stderr=process.stderr, details=details,
+    )
+    return _print_operation(command, {"claude": result}, options.format, verbose=True)
 
 
 def _restore_hooks(options: argparse.Namespace) -> int:
@@ -514,18 +549,31 @@ def _restore_hooks(options: argparse.Namespace) -> int:
 
 def _restore_claude(options: argparse.Namespace) -> int:
     arguments = ["restore", "--target", options.target_file, "--backup", options.backup]
+    if options.format == "json":
+        arguments.append("--json")
+    if options.scope:
+        arguments.extend(["--scope", options.scope])
+    if options.project_dir:
+        if not options.scope:
+            raise ValueError("--project-dir requires --scope for controlled restore")
+        arguments.extend(["--project-dir", options.project_dir])
     if options.yes and not options.dry_run:
         arguments.append("--yes")
     else:
         arguments.append("--dry-run")
     process = _run_engine(CLAUDE_ENGINE, arguments)
+    try:
+        details = json.loads(process.stdout) if options.format == "json" else None
+    except json.JSONDecodeError:
+        details = None
     result = ProviderResult(
         provider="claude",
         exitCode=process.returncode,
-        outcome="applied" if options.yes and process.returncode == 0 else "previewed" if process.returncode == 0 else "error",
+        outcome="applied" if options.yes and not options.dry_run and process.returncode == 0 else "previewed" if process.returncode == 0 else "error",
         path=options.target_file,
         stdout=process.stdout,
         stderr=process.stderr,
+        details=details,
     )
     return _print_operation("restore", {"claude": result}, options.format)
 
@@ -581,12 +629,26 @@ def _parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="diagnose the Claude runtime integration")
     doctor.add_argument("target", choices=("claude",))
     doctor.add_argument("--format", choices=("text", "json"), default="text")
-    recover = subparsers.add_parser("recover", help="preview or recover interrupted Codex transactions")
-    recover.add_argument("target", choices=("codex",))
+    recover = subparsers.add_parser("recover", help="preview or recover interrupted provider transactions")
+    recover.add_argument("target", choices=("codex", "claude"))
     recover.add_argument("--codex-dir")
+    recover.add_argument("--scope", choices=("user", "project", "local"))
+    recover.add_argument("--project-dir")
     recover.add_argument("--dry-run", action="store_true")
     recover.add_argument("--yes", action="store_true")
     recover.add_argument("--format", choices=("text", "json"), default="text")
+    reactivate = subparsers.add_parser("reactivate", help="restore a missing Codex instruction config field")
+    reactivate.add_argument("target", choices=("codex",))
+    reactivate.add_argument("--codex-dir")
+    reactivate.add_argument("--dry-run", action="store_true")
+    reactivate.add_argument("--yes", action="store_true")
+    reactivate.add_argument("--format", choices=("text", "json"), default="text")
+    reactivate.set_defaults(scope=None, project_dir=None)
+    backups = subparsers.add_parser("backups", help="list managed Claude backup files (read-only)")
+    backups.add_argument("target", choices=("claude",))
+    backups.add_argument("--scope", choices=("user", "project", "local"), default="user")
+    backups.add_argument("--project-dir")
+    backups.add_argument("--format", choices=("text", "json"), default="text")
     restore_hooks = subparsers.add_parser("restore-hooks", help="restore Codex hooks.json")
     restore_hooks.add_argument("target", choices=("codex",))
     restore_hooks.add_argument("--codex-dir")
@@ -595,6 +657,8 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("target", choices=("claude",))
     restore.add_argument("--target-file", required=True)
     restore.add_argument("--backup", required=True)
+    restore.add_argument("--scope", choices=("user", "project", "local"))
+    restore.add_argument("--project-dir")
     restore.add_argument("--dry-run", action="store_true")
     restore.add_argument("--yes", action="store_true")
     restore.add_argument("--format", choices=("text", "json"), default="text")
@@ -645,12 +709,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _parser().error(str(error))
     if options.command == "doctor":
         return _doctor(options)
-    if options.command == "recover":
-        return _recover(options)
+    if options.command in ("recover", "reactivate"):
+        try:
+            return _recover(options)
+        except ValueError as error:
+            _parser().error(str(error))
+    if options.command == "backups":
+        return _claude_maintenance(options, "backups")
     if options.command == "restore-hooks":
         return _restore_hooks(options)
     if options.command == "restore":
-        return _restore_claude(options)
+        try:
+            return _restore_claude(options)
+        except ValueError as error:
+            _parser().error(str(error))
     if options.command in ("codex", "claude"):
         return _passthrough(options.command, options.arguments)
     _parser().print_help()

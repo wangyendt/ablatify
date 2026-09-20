@@ -60,7 +60,7 @@ def test_native_provider_passthrough_preserves_output_and_exit_code(tmp_path: Pa
     assert codex.returncode == 0, codex.stderr
     assert "codex-instruct" in codex.stdout
     assert claude.returncode == 0, claude.stderr
-    assert "claude-keysmith v6" in claude.stdout
+    assert "claude-keysmith v7.2" in claude.stdout
 
 
 def test_codex_deploy_dry_run_previews_default_home_without_writing(tmp_path: Path) -> None:
@@ -75,7 +75,7 @@ def test_codex_deploy_dry_run_previews_default_home_without_writing(tmp_path: Pa
     assert "Codex" in result.stdout
     assert "dry-run" in result.stdout.lower() or "preview" in result.stdout.lower()
     assert config.read_text(encoding="utf-8") == 'model = "gpt-5"\n'
-    assert not (codex_dir / "gpt-unrestricted.md").exists()
+    assert not (codex_dir / "gpt-overlay.md").exists()
 
 
 def test_deploy_all_yes_applies_each_provider_default_profile(tmp_path: Path) -> None:
@@ -86,7 +86,7 @@ def test_deploy_all_yes_applies_each_provider_default_profile(tmp_path: Path) ->
     result = run_ablatify(tmp_path, "deploy", "all", "--yes")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (codex_dir / "gpt-unrestricted.md").is_file()
+    assert (codex_dir / "gpt-overlay.md").is_file()
     assert (codex_dir / ".codex-keysmith-manifest.json").is_file()
     claude_home = tmp_path / "home" / ".claude"
     assert (claude_home / "keysmith" / "claude-project-rules.md").is_file()
@@ -112,7 +112,7 @@ def test_uninstall_all_yes_removes_the_default_global_profiles(tmp_path: Path) -
     result = run_ablatify(tmp_path, "uninstall", "all", "--yes")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not (codex_dir / "gpt-unrestricted.md").exists()
+    assert not (codex_dir / "gpt-overlay.md").exists()
     assert (codex_dir / "config.toml").read_text(encoding="utf-8") == original_config
     claude_home = tmp_path / "home" / ".claude"
     assert not (claude_home / "keysmith" / "claude-project-rules.md").exists()
@@ -247,7 +247,7 @@ def test_external_instruction_file_is_given_to_both_providers(tmp_path: Path) ->
     result = run_ablatify(tmp_path, "deploy", "all", "--file", str(instruction), "--yes")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (codex_dir / "gpt-unrestricted.md").read_text(encoding="utf-8") == instruction.read_text(
+    assert (codex_dir / "gpt-overlay.md").read_text(encoding="utf-8") == instruction.read_text(
         encoding="utf-8"
     )
     assert (
@@ -286,3 +286,103 @@ def test_target_option_alias_and_provider_specific_validation_are_friendly(tmp_p
     assert set(json.loads(status.stdout)["results"]) == {"claude"}
     assert invalid.returncode == 2
     assert "--project-dir only applies to Claude" in invalid.stderr
+
+
+def test_reactivate_previews_then_restores_missing_config_field(tmp_path: Path) -> None:
+    codex = tmp_path / 'home' / '.codex'
+    codex.mkdir(parents=True)
+    config = codex / 'config.toml'
+    config.write_text('model = "gpt-5"\n', encoding='utf-8')
+    assert run_ablatify(tmp_path, 'deploy', 'codex', '--yes').returncode == 0
+    config.write_text('model = "gpt-5"\n', encoding='utf-8')
+    preview = run_ablatify(tmp_path, 'reactivate', 'codex')
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert config.read_text() == 'model = "gpt-5"\n'
+    applied = run_ablatify(tmp_path, 'reactivate', 'codex', '--yes')
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert 'gpt-overlay.md' in config.read_text()
+
+
+def test_claude_backups_and_recover_are_exposed_with_native_evidence(tmp_path: Path) -> None:
+    assert run_ablatify(tmp_path, 'deploy', 'claude', '--yes').returncode == 0
+    assert run_ablatify(tmp_path, 'uninstall', 'claude', '--yes').returncode == 0
+    backups = run_ablatify(tmp_path, 'backups', 'claude', '--format', 'json')
+    assert backups.returncode == 0, backups.stdout + backups.stderr
+    details = json.loads(backups.stdout)['results']['claude']['details']
+    assert details['schema'] == 'claude-keysmith/v1'
+    assert details['backups']
+    recovered = run_ablatify(tmp_path, 'recover', 'claude', '--yes', '--dry-run', '--format', 'json')
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    result = json.loads(recovered.stdout)['results']['claude']
+    assert result['outcome'] == 'previewed'
+    assert result['details']['mode'] == 'preview'
+
+
+def test_scoped_restore_rejects_unmanaged_backup(tmp_path: Path) -> None:
+    target, backup = tmp_path / 'CLAUDE.md', tmp_path / 'arbitrary.bak'
+    target.write_text('current')
+    backup.write_text('old')
+    result = run_ablatify(tmp_path, 'restore', 'claude', '--scope', 'user',
+                          '--target-file', str(target), '--backup', str(backup), '--yes')
+    assert result.returncode != 0
+    assert target.read_text() == 'current'
+
+
+def test_packaged_codex_libraries_are_available_through_native_cli(tmp_path: Path) -> None:
+    scenarios = run_ablatify(tmp_path, 'codex', '--', '--scenario-list')
+    packs = run_ablatify(tmp_path, 'codex', '--', '--scaffold-list')
+    assert scenarios.returncode == 0, scenarios.stdout + scenarios.stderr
+    assert 'example_fixture' in scenarios.stdout
+    assert packs.returncode == 0, packs.stdout + packs.stderr
+    assert 'pytest_complete' in packs.stdout
+
+
+def test_deploy_does_not_change_provider_or_install_network_helper(tmp_path: Path) -> None:
+    codex = tmp_path / 'home' / '.codex'
+    codex.mkdir(parents=True)
+    provider = '\nmodel_provider = "test"\n[model_providers.test]\nname = "test"\nbase_url = "https://example.invalid/v1"\n'
+    (codex / 'config.toml').write_text(provider)
+    result = run_ablatify(tmp_path, 'deploy', 'codex', '--yes')
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = (codex / 'config.toml').read_text()
+    assert actual.replace('model_instructions_file = "./gpt-overlay.md"\n', '') == provider
+    assert not list((tmp_path / 'home').rglob('*envelope*'))
+    assert not (tmp_path / 'home' / 'Library').exists()
+
+
+def test_historical_codex_deployment_can_upgrade_and_uninstall(tmp_path: Path) -> None:
+    import shutil
+    codex = tmp_path / 'home' / '.codex'
+    shutil.copytree(REPO_ROOT / 'tests' / 'fixtures' / 'codex-v0.2.0', codex)
+    manifest = json.loads((codex / '.codex-keysmith-manifest.json').read_text())
+    for section in ('config', 'md'):
+        entry = manifest[section]
+        path = codex / entry['path']
+        stamp = entry['after']['mtime_ns']
+        os.utime(path, ns=(stamp, stamp))
+        if entry.get('backup'):
+            path = codex / entry['backup']
+            stamp = entry['before']['mtime_ns']
+            os.utime(path, ns=(stamp, stamp))
+    status = run_ablatify(tmp_path, 'status', 'codex', '--check')
+    assert status.returncode == 0, status.stdout + status.stderr
+    # First release had no overlay; exercise its genuine manifest and bytes.
+    assert manifest['tool_version'] == '0.2.0'
+    upgrade = run_ablatify(tmp_path, 'deploy', 'codex', '--yes')
+    assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+    assert (codex / 'gpt-overlay.md').exists()
+    uninstall = run_ablatify(tmp_path, 'uninstall', 'codex', '--yes')
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+
+
+def test_status_check_detects_claude_recovery_residue(tmp_path: Path) -> None:
+    assert run_ablatify(tmp_path, 'deploy', 'claude', '--yes').returncode == 0
+    residue = tmp_path / 'home' / '.claude' / 'keysmith' / '.journal-corrupt.json'
+    residue.write_text('{invalid')
+    status = run_ablatify(tmp_path, 'status', 'claude', '--check', '--format', 'json')
+    assert status.returncode == 1
+    assert json.loads(status.stdout)['results']['claude']['details']['recovery_state']['recovery_required']
+    before = residue.read_bytes()
+    recovered = run_ablatify(tmp_path, 'recover', 'claude', '--format', 'json')
+    assert recovered.returncode != 0
+    assert residue.read_bytes() == before

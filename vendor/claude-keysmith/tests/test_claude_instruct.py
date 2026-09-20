@@ -375,7 +375,10 @@ def test_runtime_install_user_scope_writes_prompts_settings_and_wrapper(tmp_path
     append_prompt = claude_dir / "keysmith" / "append-prompt.md"
     assert system_prompt.exists()
     assert append_prompt.exists()
-    assert "senior research engineer and technical writer" in system_prompt.read_text(encoding="utf-8")
+    system_body = system_prompt.read_text(encoding="utf-8")
+    assert "You are Claude Code working in this repository." in system_body
+    assert "local lab workspace" in system_body
+    assert "senior research engineer and technical writer" not in system_body
     assert "intimate adult fiction" in append_prompt.read_text(encoding="utf-8")
 
     settings = (claude_dir / "settings.json").read_text(encoding="utf-8")
@@ -394,6 +397,115 @@ def test_runtime_install_user_scope_writes_prompts_settings_and_wrapper(tmp_path
         extra_env=shell_env,
     )
     assert '"runtime_ready": true' in status.stdout or '"runtime_ready": true' in status.stdout.replace("True", "true")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="zsh runtime is not supported on Windows")
+def test_zsh_runtime_status_accepts_missing_stale_fast_path_after_upgrade(tmp_path):
+    home = tmp_path / "home"
+    first_bin = tmp_path / "versions" / "1" / "bin"
+    second_bin = tmp_path / "versions" / "2" / "bin"
+    first_bin.mkdir(parents=True)
+    second_bin.mkdir(parents=True)
+    first_claude = first_bin / "claude"
+    second_claude = second_bin / "claude"
+    first_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    second_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    first_claude.chmod(0o755)
+    second_claude.chmod(0o755)
+    base_path = os.environ.get("PATH", "")
+
+    install = run_cli(
+        ["install", "--scope", "user", "--runtime", "--yes"],
+        home=home,
+        extra_env={
+            "CLAUDE_KEYSMITH_SHELL": "zsh",
+            "PATH": os.pathsep.join((str(first_bin), base_path)),
+        },
+        check=False,
+    )
+    assert install.returncode == 0, install.stdout + install.stderr
+    wrapper = (home / ".zshrc").read_text(encoding="utf-8")
+    assert str(first_claude.resolve()) in wrapper
+
+    first_bin.parent.rename(first_bin.parent.with_name("1.retired"))
+    status = json.loads(
+        run_cli(
+            ["status", "--scope", "user", "--runtime", "--json"],
+            home=home,
+            extra_env={
+                "CLAUDE_KEYSMITH_SHELL": "zsh",
+                "PATH": os.pathsep.join((str(second_bin), base_path)),
+            },
+        ).stdout
+    )["runtime"]
+
+    assert status["upstream_path"] == str(second_claude.resolve())
+    assert status["shell_wrapper_current"] is True
+    assert status["runtime_ready"] is True
+    assert status["upgrade_required"] is False
+
+    zshrc = home / ".zshrc"
+    drifted_wrapper = wrapper.replace("    return 127", "    return 126", 1)
+    assert drifted_wrapper != wrapper
+    zshrc.write_text(drifted_wrapper, encoding="utf-8")
+    drifted_status = json.loads(
+        run_cli(
+            ["status", "--scope", "user", "--runtime", "--json"],
+            home=home,
+            extra_env={
+                "CLAUDE_KEYSMITH_SHELL": "zsh",
+                "PATH": os.pathsep.join((str(second_bin), base_path)),
+            },
+        ).stdout
+    )["runtime"]
+    assert drifted_status["shell_wrapper_current"] is False
+    assert drifted_status["runtime_ready"] is False
+    assert drifted_status["upgrade_required"] is True
+
+    installed_block = claude_instruct.shell_block_pattern().search(wrapper).group(0)
+    expected_block = installed_block.replace(
+        f'  entry="{first_claude.resolve()}"',
+        f'  entry="{second_claude.resolve()}"',
+        1,
+    )
+
+    def block_with_entry(raw):
+        return expected_block.replace(
+            f'  entry="{second_claude.resolve()}"',
+            f'  entry="{raw}"',
+            1,
+        )
+
+    missing_literal = tmp_path / "retired version" / "claude-旧"
+    assert claude_instruct.shell_wrapper_is_current(
+        block_with_entry(missing_literal), expected_block, "zsh"
+    )
+
+    existing_file = tmp_path / "existing-claude"
+    existing_file.write_text("fixture\n", encoding="utf-8")
+    existing_dir = tmp_path / "existing-dir"
+    existing_dir.mkdir()
+    dangling_link = tmp_path / "dangling-claude"
+    dangling_link.symlink_to(tmp_path / "missing-target")
+    rejected_entries = (
+        "claude",
+        "~/retired/claude",
+        f"{tmp_path}/$(id)/claude",
+        f"{tmp_path}/`id`/claude",
+        str(tmp_path / "retired\\version" / "claude"),
+        str(tmp_path / "bad\tname" / "claude"),
+        str(existing_file),
+        str(existing_dir),
+        str(dangling_link),
+    )
+    for raw in rejected_entries:
+        assert not claude_instruct.shell_wrapper_is_current(
+            block_with_entry(raw), expected_block, "zsh"
+        )
+
+    assert not claude_instruct.shell_wrapper_is_current(
+        installed_block, expected_block, "powershell"
+    )
 
 
 def test_runtime_install_sets_max_tokens_only_when_explicit(tmp_path):
@@ -538,9 +650,97 @@ def test_windows_style_runtime_install_uses_powershell_profile(tmp_path):
     assert "# existing powershell profile" in profile_after
 
 
-def test_version_reports_v6(tmp_path):
+def test_gui_like_runtime_preview_does_not_require_psmodulepath(tmp_path):
+    home = tmp_path / "home"
+    extra_env = {
+        "CLAUDE_KEYSMITH_SHELL": "powershell",
+        "PATH": str(home / "empty-path"),
+        "PSModulePath": "",
+    }
+    result = run_cli(
+        ["install", "--scope", "user", "--runtime", "--json"],
+        home=home,
+        extra_env=extra_env,
+        check=False,
+    )
+    payload = json.loads(result.stdout)
+    blockers = " ".join(payload.get("blockers") or [])
+    error = payload.get("error") or ""
+    assert "PSModulePath" not in blockers
+    assert "PSModulePath" not in error
+    assert "CLAUDE_KEYSMITH_SHELL_RC" not in blockers
+    expected_profile = home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+    assert Path(payload["target"]["shell_rc"]) == expected_profile
+
+
+def test_status_json_missing_project_dir_is_fail_closed_document(tmp_path):
+    home = tmp_path / "home"
+    missing = tmp_path / "no-such-project"
+    result = run_cli(
+        ["status", "--scope", "project", "--project-dir", str(missing), "--json"],
+        home=home,
+        check=False,
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["schema"] == "claude-keysmith/v1"
+    assert payload["ok"] is False
+    assert payload["operation"] == "status"
+    assert "project directory" in payload["error"]
+
+
+def test_status_runtime_probe_failure_still_returns_json(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_KEYSMITH_SHELL", "powershell")
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+
+    def boom():
+        raise ValueError("runtime probe exploded")
+
+    monkeypatch.setattr(claude_instruct, "user_runtime_paths", boom)
+    status = claude_instruct.collect_status("user", None, "claude-project-rules", runtime=True)
+    assert status["schema"] == "claude-keysmith/v1"
+    assert status["runtime"]["runtime_ready"] is False
+    assert "runtime probe exploded" in status["runtime"]["error"]
+    assert status["runtime_readiness"]["runtime_ready"] is False
+    assert status["presence"]["memory_file"] is False
+
+
+def test_doctor_json_probe_failure_keeps_fixed_key_set(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_KEYSMITH_SHELL", "powershell")
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+
+    def boom():
+        raise ValueError("doctor probe exploded")
+
+    monkeypatch.setattr(claude_instruct, "user_runtime_paths", boom)
+    args = type("Args", (), {"json": True})()
+    captured = []
+    monkeypatch.setattr("builtins.print", lambda text: captured.append(text))
+    exit_status = claude_instruct.command_runtime_doctor(args)
+    assert exit_status == 1
+    payload = json.loads(captured[0])
+    assert set(payload) == {
+        "installation_type",
+        "upstream_candidates",
+        "upstream_path",
+        "system_prompt_file",
+        "append_prompt_file",
+        "settings_file",
+        "shell_kind",
+        "shell_rc",
+        "repair_actions",
+    }
+    assert "doctor probe exploded" in payload["repair_actions"][0]
+
+
+def test_version_reports_current_version(tmp_path):
     result = run_cli(["--version"], home=tmp_path / "home")
-    assert result.stdout.strip() == "claude-keysmith v6"
+    assert result.stdout.strip() == f"claude-keysmith {claude_instruct.VERSION}"
+    assert claude_instruct.VERSION >= "v7"
 
 
 def test_windows_upstream_override_is_strict_even_when_other_candidates_exist(tmp_path, monkeypatch):
@@ -737,15 +937,16 @@ def test_powershell_profile_accepts_user_module_path_before_directory_exists(
     )
 
 
-def test_powershell_profile_rejects_ambiguous_module_path_without_override(tmp_path, monkeypatch):
+def test_powershell_profile_falls_back_when_module_path_is_ambiguous(tmp_path, monkeypatch):
     home = tmp_path / "home"
     ambiguous = tmp_path / "Modules"
     ambiguous.mkdir()
     monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
     monkeypatch.setenv("PSModulePath", str(ambiguous))
 
-    with pytest.raises(ValueError, match="CLAUDE_KEYSMITH_SHELL_RC"):
-        claude_instruct.powershell_profile_path(home)
+    assert claude_instruct.powershell_profile_path(home) == (
+        home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+    )
 
 
 @pytest.mark.parametrize("profile_dir", ["PowerShell", "WindowsPowerShell"])
@@ -768,15 +969,83 @@ def test_powershell_profile_uses_redirected_user_documents_and_ignores_program_f
     )
 
 
-def test_powershell_profile_rejects_program_files_only_module_path(tmp_path, monkeypatch):
+def test_powershell_profile_falls_back_when_module_path_is_program_files_only(
+    tmp_path, monkeypatch
+):
     home = tmp_path / "home"
     program_files_modules = tmp_path / "Program Files" / "PowerShell" / "Modules"
     program_files_modules.mkdir(parents=True)
     monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
     monkeypatch.setenv("PSModulePath", str(program_files_modules))
 
-    with pytest.raises(ValueError, match="CLAUDE_KEYSMITH_SHELL_RC"):
-        claude_instruct.powershell_profile_path(home)
+    assert claude_instruct.powershell_profile_path(home) == (
+        home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+    )
+
+
+def test_powershell_profile_falls_back_when_psmodulepath_missing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+    monkeypatch.delenv("PSModulePath", raising=False)
+
+    assert claude_instruct.powershell_profile_path(home) == (
+        home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+    )
+
+
+def test_powershell_profile_fallback_prefers_existing_ps7_profile(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ps7 = home / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    ps7.parent.mkdir(parents=True)
+    ps7.write_text("# existing\n", encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+    monkeypatch.delenv("PSModulePath", raising=False)
+
+    assert claude_instruct.powershell_profile_path(home) == ps7
+
+
+def test_powershell_profile_fallback_uses_chinese_documents_folder(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    profile = home / "文档" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("# existing\n", encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+    monkeypatch.delenv("PSModulePath", raising=False)
+
+    assert claude_instruct.powershell_profile_path(home) == profile
+
+
+def test_powershell_profile_isolated_home_ignores_machine_documents(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    machine = tmp_path / "machine-documents"
+    machine_profile = machine / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    machine_profile.parent.mkdir(parents=True)
+    machine_profile.write_text("# machine\n", encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+    monkeypatch.delenv("PSModulePath", raising=False)
+    monkeypatch.setattr(claude_instruct, "_home_is_windows_user_profile", lambda _home: False)
+    monkeypatch.setattr(claude_instruct, "_windows_documents_from_known_folder", lambda: machine)
+    monkeypatch.setattr(claude_instruct, "_windows_documents_from_registry", lambda: machine)
+
+    assert claude_instruct.powershell_profile_path(home) == (
+        home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"
+    )
+    assert claude_instruct.powershell_profile_path(home) != machine_profile
+
+
+def test_powershell_profile_real_user_home_uses_known_documents(tmp_path, monkeypatch):
+    home = tmp_path / "user"
+    redirected = tmp_path / "OneDrive" / "Documents"
+    profile = redirected / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("# existing\n", encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_KEYSMITH_SHELL_RC", raising=False)
+    monkeypatch.delenv("PSModulePath", raising=False)
+    monkeypatch.setattr(claude_instruct, "_home_is_windows_user_profile", lambda _home: True)
+    monkeypatch.setattr(claude_instruct, "_windows_documents_from_known_folder", lambda: redirected)
+    monkeypatch.setattr(claude_instruct, "_windows_documents_from_registry", lambda: None)
+
+    assert claude_instruct.powershell_profile_path(home) == profile
 
 
 def test_runtime_install_migrates_recognized_local_bin_launchers(tmp_path):
@@ -842,6 +1111,33 @@ def test_legacy_launcher_migration_never_overwrites_preoccupied_backup(tmp_path)
     assert not legacy_cmd.exists()
 
 
+def test_legacy_launcher_migration_preserves_same_content_backup_raced_after_plan(tmp_path):
+    home = tmp_path / "home"
+    local_bin = home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    legacy_ps1 = local_bin / "claude.ps1"
+    legacy_cmd = local_bin / "claude.cmd"
+    ps1_content = "# claude-keysmith\n$systemPrompt = 'system-prompt'\n"
+    legacy_ps1.write_text(ps1_content, encoding="utf-8")
+    legacy_cmd.write_bytes(
+        b'@echo off\r\npowershell.exe -File "%~dp0claude.ps1" %*\r\n'
+    )
+    plan = claude_instruct.plan_legacy_launcher_migration(home, "20260807_120000")
+    raced_backup = Path(plan[0]["backup"])
+    raced_backup.write_text(ps1_content, encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="拒绝覆盖"):
+        claude_instruct.migrate_legacy_launchers(
+            home,
+            "20260807_120000",
+            migration_plan=plan,
+        )
+
+    assert legacy_ps1.read_text(encoding="utf-8") == ps1_content
+    assert raced_backup.read_text(encoding="utf-8") == ps1_content
+    assert legacy_cmd.exists()
+
+
 def test_legacy_launcher_migration_rolls_back_first_file_when_second_move_fails(
     tmp_path, monkeypatch
 ):
@@ -854,14 +1150,14 @@ def test_legacy_launcher_migration_rolls_back_first_file_when_second_move_fails(
     cmd_content = '@echo off\r\npowershell.exe -File "%~dp0claude.ps1" %*\r\n'
     legacy_ps1.write_text(ps1_content, encoding="utf-8")
     legacy_cmd.write_bytes(cmd_content.encode("utf-8"))
-    real_replace = claude_instruct.os.replace
+    real_move = claude_instruct._move_file_no_overwrite
 
     def fail_cmd_migration(source, target):
         if Path(source) == legacy_cmd and ".bak_20260807_120000_pre_v6" in str(target):
             raise OSError("cmd migration failed")
-        return real_replace(source, target)
+        return real_move(Path(source), Path(target))
 
-    monkeypatch.setattr(claude_instruct.os, "replace", fail_cmd_migration)
+    monkeypatch.setattr(claude_instruct, "_move_file_no_overwrite", fail_cmd_migration)
 
     with pytest.raises(OSError, match="cmd migration failed"):
         claude_instruct.migrate_legacy_launchers(home, "20260807_120000")
@@ -870,6 +1166,34 @@ def test_legacy_launcher_migration_rolls_back_first_file_when_second_move_fails(
     assert legacy_cmd.read_bytes() == cmd_content.encode("utf-8")
     assert not list(local_bin.glob("claude.ps1.bak_*_pre_v6*"))
     assert not list(local_bin.glob("claude.cmd.bak_*_pre_v6*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks is not reliably permitted on Windows runners")
+def test_runtime_install_refuses_dangling_legacy_launcher_symlink_before_any_write(tmp_path):
+    home = tmp_path / "home"
+    profile = home / "profile.ps1"
+    upstream = tmp_path / "upstream" / "claude.exe"
+    upstream.parent.mkdir(parents=True)
+    upstream.write_bytes(b"fixture")
+    dangling = home / ".local" / "bin" / "claude.ps1"
+    dangling.parent.mkdir(parents=True)
+    dangling.symlink_to(dangling.parent / "missing-upstream.ps1")
+    env = windows_runtime_env(home, profile, CLAUDE_KEYSMITH_CLAUDE_BIN=upstream)
+
+    result = run_cli(
+        ["install", "--scope", "user", "--runtime", "--yes", "--json"],
+        home=home,
+        extra_env=env,
+        check=False,
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert payload["ok"] is False
+    assert "拒绝" in payload["error"]
+    assert dangling.is_symlink()
+    assert not (home / ".claude").exists()
+    assert not profile.exists()
 
 
 def test_runtime_install_refuses_unknown_local_bin_launcher_before_any_write(tmp_path):
@@ -1120,6 +1444,7 @@ def test_powershell_wrapper_waits_for_late_upstream_and_returns_control(tmp_path
     system_prompt = tmp_path / "prompt's dir" / "system-prompt.md"
     append_prompt = tmp_path / "prompt's dir" / "append-prompt.md"
     arg_log = tmp_path / "args.json"
+    ready_marker = tmp_path / "wrapper-ready.txt"
     return_marker = tmp_path / "returned.txt"
     profile.parent.mkdir(parents=True)
     system_prompt.parent.mkdir(parents=True)
@@ -1134,10 +1459,10 @@ def test_powershell_wrapper_waits_for_late_upstream_and_returns_control(tmp_path
     )
     profile.write_text(wrapper, encoding="utf-8")
 
-    def create_upstream_later():
-        time.sleep(0.6)
+    def publish_upstream():
         upstream.parent.mkdir(parents=True, exist_ok=True)
-        upstream.write_text(
+        staged_upstream = upstream.with_name(f".{upstream.name}.tmp")
+        staged_upstream.write_text(
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
             "from pathlib import Path\n"
@@ -1145,14 +1470,15 @@ def test_powershell_wrapper_waits_for_late_upstream_and_returns_control(tmp_path
             f"raise SystemExit({upstream_exit})\n",
             encoding="utf-8",
         )
-        upstream.chmod(0o755)
+        staged_upstream.chmod(0o755)
+        # Publish the fixture only after it is complete and executable.
+        staged_upstream.replace(upstream)
 
-    creator = threading.Thread(target=create_upstream_later)
-    creator.start()
     command = "\n".join(
         [
             f". {claude_instruct._powershell_quote(profile)}",
             "$PSNativeCommandUseErrorActionPreference = $true",
+            f"Set-Content -LiteralPath {claude_instruct._powershell_quote(ready_marker)} -Value ready",
             "claude 'space value' '--literal=$dollar' 'semi;colon'",
             "$code = $LASTEXITCODE",
             f"Set-Content -LiteralPath {claude_instruct._powershell_quote(return_marker)} -Value $code",
@@ -1161,19 +1487,32 @@ def test_powershell_wrapper_waits_for_late_upstream_and_returns_control(tmp_path
     )
     env = os.environ.copy()
     env["KEYSMITH_ARG_LOG"] = str(arg_log)
+    process = subprocess.Popen(
+        [claude_instruct.shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-Command", command],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     try:
-        result = subprocess.run(
-            [claude_instruct.shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-Command", command],
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=15,
-            check=False,
-        )
-    finally:
-        creator.join(timeout=5)
+        ready_deadline = time.monotonic() + claude_instruct.WINDOWS_UPSTREAM_RETRY_SECONDS + 20
+        while not ready_marker.exists() and process.poll() is None and time.monotonic() < ready_deadline:
+            time.sleep(0.01)
+        if not ready_marker.exists():
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise AssertionError(f"PowerShell wrapper did not become ready:\n{stdout}{stderr}")
+        time.sleep(0.6)
+        publish_upstream()
+        stdout, stderr = process.communicate(timeout=claude_instruct.WINDOWS_UPSTREAM_RETRY_SECONDS + 20)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+        raise
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert process.returncode == 0, stdout + stderr
+    assert ready_marker.read_text(encoding="utf-8").strip() == "ready"
     assert return_marker.read_text(encoding="utf-8").strip() == str(upstream_exit)
     forwarded = json.loads(arg_log.read_text(encoding="utf-8"))
     assert forwarded[-3:] == ["space value", "--literal=$dollar", "semi;colon"]
@@ -1372,16 +1711,16 @@ def test_powershell_wrapper_all_candidates_missing_throws_and_returns_control(tm
     append_prompt.write_text("append\n", encoding="utf-8")
     monkeypatch.setattr(claude_instruct, "WINDOWS_UPSTREAM_RETRY_SECONDS", 0.2)
     monkeypatch.setattr(claude_instruct, "WINDOWS_UPSTREAM_RETRY_MILLISECONDS", 25)
-    profile.write_text(
-        claude_instruct.render_shell_wrapper(
-            missing,
-            system_prompt,
-            append_prompt,
-            "powershell",
-            [{"kind": "missing", "path": str(missing), "exists": False, "eligible": True, "reason": "missing"}],
-        ),
-        encoding="utf-8",
+    wrapper = claude_instruct.render_shell_wrapper(
+        missing,
+        system_prompt,
+        append_prompt,
+        "powershell",
+        [{"kind": "missing", "path": str(missing), "exists": False, "eligible": True, "reason": "missing"}],
     )
+    assert "AddSeconds(0.2)" in wrapper
+    assert "Start-Sleep -Milliseconds 25" in wrapper
+    profile.write_text(wrapper, encoding="utf-8")
     command = "\n".join(
         [
             f". {claude_instruct._powershell_quote(profile)}",
@@ -1396,7 +1735,7 @@ def test_powershell_wrapper_all_candidates_missing_throws_and_returns_control(tm
         [claude_instruct.shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-Command", command],
         text=True,
         capture_output=True,
-        timeout=5,
+        timeout=15,
         check=False,
     )
 
@@ -1404,11 +1743,22 @@ def test_powershell_wrapper_all_candidates_missing_throws_and_returns_control(tm
     assert continued_marker.read_text(encoding="utf-8").strip() == "continued"
 
 
-@pytest.mark.skipif(os.name == "nt" or claude_instruct.shutil.which("pwsh") is None, reason="requires Unix pwsh")
-def test_powershell_wrapper_reselects_after_candidate_vanishes_before_start(tmp_path):
+@pytest.mark.parametrize(
+    "powershell",
+    [
+        executable
+        for executable in (
+            claude_instruct.shutil.which("pwsh"),
+            claude_instruct.shutil.which("powershell.exe"),
+        )
+        if executable
+    ],
+    ids=lambda executable: Path(executable).name,
+)
+def test_powershell_wrapper_reselects_after_candidate_vanishes_before_start(tmp_path, powershell):
     profile = tmp_path / "profile.ps1"
-    vanishing = tmp_path / "vanishing.exe"
-    fallback = tmp_path / "fallback.exe"
+    vanishing = tmp_path / "vanishing.ps1"
+    fallback = tmp_path / "fallback.ps1"
     system_prompt = tmp_path / "prompts" / "system-prompt.md"
     append_prompt = tmp_path / "prompts" / "append-prompt.md"
     fallback_log = tmp_path / "fallback.json"
@@ -1417,13 +1767,11 @@ def test_powershell_wrapper_reselects_after_candidate_vanishes_before_start(tmp_
     system_prompt.write_text("system\n", encoding="utf-8")
     append_prompt.write_text("append\n", encoding="utf-8")
     fallback.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, sys\n"
-        "from pathlib import Path\n"
-        "Path(os.environ['KEYSMITH_FALLBACK_LOG']).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n",
+        "$json = ConvertTo-Json -Compress -InputObject @($args)\n"
+        "[System.IO.File]::WriteAllText("
+        "$env:KEYSMITH_FALLBACK_LOG, $json, [System.Text.UTF8Encoding]::new($false))\n",
         encoding="utf-8",
     )
-    fallback.chmod(0o755)
     profile.write_text(
         claude_instruct.render_shell_wrapper(
             vanishing,
@@ -1458,11 +1806,11 @@ def test_powershell_wrapper_reselects_after_candidate_vanishes_before_start(tmp_
     env["KEYSMITH_FALLBACK_LOG"] = str(fallback_log)
 
     result = subprocess.run(
-        [claude_instruct.shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-Command", command],
+        [powershell, "-NoLogo", "-NoProfile", "-Command", command],
         env=env,
         text=True,
         capture_output=True,
-        timeout=10,
+        timeout=30,
         check=False,
     )
 
@@ -1486,14 +1834,16 @@ def test_powershell_wrapper_reselects_after_candidate_vanishes_before_start(tmp_
 @pytest.mark.parametrize(
     ("failure_line", "exception_name"),
     [
-        ("keysmith-command-that-does-not-exist", "CommandNotFoundException"),
+        (
+            "throw [System.Management.Automation.CommandNotFoundException]::new('fixture command failure')",
+            "CommandNotFoundException",
+        ),
         (
             "Get-Item -LiteralPath (Join-Path $PSScriptRoot 'missing-internal-item')",
             "ItemNotFoundException",
         ),
         (
-            "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force\n"
-            "& $MyInvocation.MyCommand.Path",
+            "& { throw [System.Management.Automation.CommandNotFoundException]::new('nested fixture failure') }",
             "CommandNotFoundException",
         ),
     ],
@@ -1526,31 +1876,37 @@ def test_powershell_wrapper_does_not_retry_errors_from_started_script(
     )
     monkeypatch.setattr(claude_instruct, "WINDOWS_UPSTREAM_RETRY_SECONDS", 0.2)
     monkeypatch.setattr(claude_instruct, "WINDOWS_UPSTREAM_RETRY_MILLISECONDS", 25)
-    profile.write_text(
-        claude_instruct.render_shell_wrapper(
-            upstream,
-            system_prompt,
-            append_prompt,
-            "powershell",
-            [
-                {
-                    "kind": "script",
-                    "path": str(upstream),
-                    "exists": True,
-                    "eligible": True,
-                    "reason": "fixture",
-                },
-                {
-                    "kind": "fallback",
-                    "path": str(fallback),
-                    "exists": True,
-                    "eligible": True,
-                    "reason": "must not run",
-                },
-            ],
-        ),
-        encoding="utf-8",
+    wrapper = claude_instruct.render_shell_wrapper(
+        upstream,
+        system_prompt,
+        append_prompt,
+        "powershell",
+        [
+            {
+                "kind": "script",
+                "path": str(upstream),
+                "exists": True,
+                "eligible": True,
+                "reason": "fixture",
+            },
+            {
+                "kind": "fallback",
+                "path": str(fallback),
+                "exists": True,
+                "eligible": True,
+                "reason": "must not run",
+            },
+        ],
     )
+    assert "AddSeconds(0.2)" in wrapper
+    assert "Start-Sleep -Milliseconds 25" in wrapper
+    launch_failure_guard = (
+        "$_.InvocationInfo.InvocationName -eq '&' -and "
+        "$_.CategoryInfo.TargetName -eq $candidate -and "
+        "$_.InvocationInfo.ScriptName -eq $PSCommandPath"
+    )
+    assert wrapper.count(launch_failure_guard) == 2
+    profile.write_text(wrapper, encoding="utf-8")
     command = "\n".join(
         [
             f". {claude_instruct._powershell_quote(profile)}",
@@ -1568,7 +1924,7 @@ def test_powershell_wrapper_does_not_retry_errors_from_started_script(
         env=env,
         text=True,
         capture_output=True,
-        timeout=5,
+        timeout=30,
         check=False,
     )
 

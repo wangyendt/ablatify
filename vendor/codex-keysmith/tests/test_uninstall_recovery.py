@@ -54,7 +54,7 @@ def _make_rich_deployment(tmp_path, name):
     (codex_dir / "hooks.json").write_bytes(b"\x00active hooks\xff")
     (codex_dir / "hooks.json.disabled").write_bytes(b"previous disabled\n")
     (codex_dir / codex_instruct.LEGACY_MD_FILENAME).write_bytes(b"legacy prompt\n")
-    deployed = _run("--codex-dir", codex_dir, "--yes")
+    deployed = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert deployed.returncode == 0, deployed.stdout + deployed.stderr
     return codex_dir
 
@@ -641,30 +641,42 @@ def test_uninstall_initializing_recovery_fails_closed_on_live_drift(tmp_path):
         "first-journal",
     )
     assert interrupted.returncode == HARD_EXIT, interrupted.stdout + interrupted.stderr
+    anchors = [path for path in (first, second) if _journal_dirs(path)]
     if os.name == "nt":
         # TerminateProcess can run after ReplaceFileW publishes journal.json but
         # before the parent directory flush. Some Windows filesystems may lose
         # that newest directory entry; this generic fail-closed case cannot
         # require evidence that the platform did not persist. The dedicated
         # Windows lifecycle suite covers durable recovery checkpoints.
-        if not any(_journal_dirs(path) for path in (first, second)):
+        if not anchors:
             pytest.skip("Windows did not persist the interrupted journal entry")
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    drifted = next(path for path in (first, second) if path != anchor)
     user_bytes = b'user-owned config drift\nmodel = "custom"\n'
-    config = second / "config.toml"
+    config = drifted / "config.toml"
     config.write_bytes(user_bytes)
     visible_before = {
         path: _snapshot_tree(path, include_transactions=False)
         for path in (first, second)
     }
+    residue_before = {
+        path: _snapshot_tree(path)
+        for path in (first, second)
+    }
 
-    recovered = _run("--codex-dir", first, "--recover", "--yes")
+    recovered = _run("--codex-dir", anchor, "--recover", "--yes")
 
     assert recovered.returncode == 1
+    output = recovered.stdout + recovered.stderr
+    assert "live path" in output
+    assert str(config) in output
     assert config.read_bytes() == user_bytes
     for codex_dir in (first, second):
         assert _snapshot_tree(codex_dir, include_transactions=False) == visible_before[
             codex_dir
         ]
+        assert _snapshot_tree(codex_dir) == residue_before[codex_dir]
         assert codex_instruct._hooks_transaction_residue(codex_dir)
 
 
@@ -765,7 +777,7 @@ def test_uninstall_publishes_immutable_multi_directory_intent_before_mutation(tm
 
 def test_stacked_uninstall_recovers_after_previous_manifest_publication(tmp_path):
     codex_dir = _make_rich_deployment(tmp_path, "stacked")
-    second_deploy = _run("--codex-dir", codex_dir, "--yes")
+    second_deploy = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert second_deploy.returncode == 0, second_deploy.stdout + second_deploy.stderr
     before = _snapshot_tree(codex_dir)
 
@@ -1557,7 +1569,7 @@ def test_recovery_after_merged_config_publication_restores_live_rewrite(tmp_path
     codex_dir = tmp_path / "merged-config-recovery"
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text('model = "before"\n', encoding="utf-8")
-    deployed = _run("--codex-dir", codex_dir, "--yes")
+    deployed = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert deployed.returncode == 0, deployed.stdout + deployed.stderr
     live_rewrite = (
         'model = "ccswitch-model"\n'
@@ -1621,7 +1633,7 @@ def test_merged_config_write_residue_cleanup_failure_rolls_back_and_keeps_eviden
     codex_dir = tmp_path / "merged-config-cleanup-failure"
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text('model = "before"\n', encoding="utf-8")
-    deployed = _run("--codex-dir", codex_dir, "--yes")
+    deployed = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert deployed.returncode == 0, deployed.stdout + deployed.stderr
     live_rewrite = (
         'model = "ccswitch-model"\n'
@@ -1690,7 +1702,7 @@ def test_merged_config_write_residue_is_pre_authorized_by_immutable_intent(
     codex_dir = tmp_path / "merged-config-residue"
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text('model = "before"\n', encoding="utf-8")
-    deployed = _run("--codex-dir", codex_dir, "--yes")
+    deployed = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert deployed.returncode == 0, deployed.stdout + deployed.stderr
     (codex_dir / "config.toml").write_text(
         'model = "ccswitch-model"\n'
@@ -1786,14 +1798,14 @@ def test_terminal_recovered_cleanup_revalidates_restored_manifest_backups(
     codex_dir = tmp_path / f"recovered-manifest-backup-{damage}"
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text('model = "before"\n', encoding="utf-8")
-    first = _run("--codex-dir", codex_dir, "--yes")
+    first = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert first.returncode == 0, first.stdout + first.stderr
     (codex_dir / "config.toml").write_text(
         'model_instructions_file = "./gpt-unrestricted.md"\n'
         'model = "changed-before-second-layer"\n',
         encoding="utf-8",
     )
-    second = _run("--codex-dir", codex_dir, "--yes")
+    second = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
     assert second.returncode == 0, second.stdout + second.stderr
     current_manifest = json.loads(
         (codex_dir / codex_instruct.MANIFEST_FILENAME).read_text(encoding="utf-8")
@@ -1868,8 +1880,8 @@ def test_committed_terminal_cleanup_revalidates_restored_manifest_backups(tmp_pa
     for codex_dir in (first, second):
         codex_dir.mkdir()
         (codex_dir / "config.toml").write_text('model = "before"\n', encoding="utf-8")
-        first_layer = _run("--codex-dir", codex_dir, "--yes")
-        second_layer = _run("--codex-dir", codex_dir, "--yes")
+        first_layer = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
+        second_layer = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
         assert first_layer.returncode == 0, first_layer.stdout + first_layer.stderr
         assert second_layer.returncode == 0, second_layer.stdout + second_layer.stderr
     source = f"""
@@ -1917,7 +1929,7 @@ def test_committed_merged_config_cleanup_validates_sha_only_after(tmp_path):
             'model = "before"\n',
             encoding="utf-8",
         )
-        deployed = _run("--codex-dir", codex_dir, "--yes")
+        deployed = _run("--codex-dir", codex_dir, "--preset", "unrestricted", "--yes")
         assert deployed.returncode == 0, deployed.stdout + deployed.stderr
         (codex_dir / "config.toml").write_text(
             'model = "ccswitch-model"\n'

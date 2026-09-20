@@ -28,7 +28,9 @@
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "UPSTREAMS.md"
+    "UPSTREAMS.md",
+    "vendor/codex-keysmith/scenarios/",
+    "vendor/codex-keysmith/fixture_packs/"
   ],
   "engines": {
     "node": ">=20"

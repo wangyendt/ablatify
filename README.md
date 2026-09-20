@@ -178,3 +178,40 @@ ablatify deploy all --yes
 
 Ablatify is MIT licensed. Vendored upstream components remain covered by their
 included MIT licenses.
+
+## Upstream refresh (September 2026)
+
+Bundled engines: Codex 0.6.0 plus fixes through `f469195`; Claude v7.2 plus
+Windows/JSON fixes through `8b6a574`. Codex's default is now `gpt-overlay.md`,
+not `gpt-unrestricted.md`. Existing manifests remain readable; a deployment is
+still an explicit operation, not part of npm installation. Old unmanaged files
+are preserved. Inspect the preview before upgrading an existing installation.
+Uninstall may first restore the previous managed deployment; inspect status and
+preview again if removing a layered deployment completely.
+
+```bash
+# Restore a missing Codex model_instructions_file field (preview first)
+ablatify reactivate codex
+ablatify reactivate codex --yes
+
+# Claude transaction recovery and managed backups (global by default)
+ablatify recover claude
+ablatify recover claude --yes
+ablatify backups claude
+ablatify backups claude --scope project --project-dir /path/to/project --format json
+ablatify restore claude --scope user --target-file /path/to/target --backup /path/to/backup --yes
+
+# Optional local libraries through native passthrough
+ablatify codex -- --scenario-list
+ablatify codex -- --scaffold-list
+```
+
+`--scope` on `restore` restricts the backup/target pair to that scope's managed
+backup inventory. Without it, the advanced explicit-path restore remains
+available. Recovery defaults to preview; `--dry-run` takes precedence over `--yes`.
+
+The npm package remains CLI-only. Codex's new network envelope, provider URL
+rewriting, and background service installation are intentionally not bundled.
+Scenario/fixture resources are included, but are only deployed when explicitly
+requested. Some optional scenario packages support macOS/Linux only; the normal
+Ablatify CLI and the example fixture support Windows too.

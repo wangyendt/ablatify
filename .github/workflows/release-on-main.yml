@@ -8,6 +8,8 @@ on:
       - src/**
       - vendor/codex-keysmith/codex-instruct.py
       - vendor/codex-keysmith/examples/**
+      - vendor/codex-keysmith/scenarios/**
+      - vendor/codex-keysmith/fixture_packs/**
       - vendor/codex-keysmith/LICENSE
       - vendor/codex-keysmith/VERSION
       - vendor/claude-keysmith/claude-instruct.py

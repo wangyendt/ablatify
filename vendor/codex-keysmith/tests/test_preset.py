@@ -1,0 +1,492 @@
+import hashlib
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "codex-instruct.py"
+EXPECTED_UNRESTRICTED_SHA256 = (
+    "e189bc928230d327adc9c953354e1468993525e12b9de7ecbb1dd63bc3bcb190"
+)
+EXPECTED_CONTRACT_SHA256 = (
+    "db20b5c049b7a1c06554ffdb39e31d1a846a34c605d1cbfedacb708a0bd7cac9"
+)
+EXPECTED_PERSONA_CONTRACT_SHA256 = (
+    "72063cc35a592ad2663a41199855350efa86708cd72108d896ef5968b0097cc8"
+)
+EXPECTED_LEAN_SHA256 = (
+    "82d8370f782d965b969a0025ea2fca314b2004b1309fd81fd76310a3e440da38"
+)
+EXPECTED_ASTRA_SHA256 = (
+    "72063cc35a592ad2663a41199855350efa86708cd72108d896ef5968b0097cc8"
+)
+EXPECTED_OVERLAY_SHA256 = (
+    "7d306ae69d831dad21ed54252b563e173877eeebc0bc92e81970849a7ab8ac4a"
+)
+spec = importlib.util.spec_from_file_location("codex_instruct_preset", MODULE_PATH)
+codex_instruct = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = codex_instruct
+spec.loader.exec_module(codex_instruct)
+
+
+def _make_codex_dir(tmp_path, name=".codex", config='model = "gpt-5.6"\n'):
+    codex_dir = tmp_path / name
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text(config, encoding="utf-8")
+    return codex_dir
+
+
+def _run(*args):
+    arguments = list(map(str, args))
+    if not any(argument == "--lang" or argument.startswith("--lang=") for argument in arguments):
+        arguments.extend(("--lang", "zh-CN"))
+    return subprocess.run(
+        [sys.executable, str(MODULE_PATH), *arguments],
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_builtin_prompts_match_example_bytes_and_frozen_unrestricted_sha256():
+    root = MODULE_PATH.parent
+    unrestricted = (root / "examples" / "gpt-unrestricted.md").read_bytes()
+    contract = (root / "examples" / "gpt-contract.md").read_bytes()
+    persona_contract = (root / "examples" / "gpt-persona-contract.md").read_bytes()
+    lean = (root / "examples" / "gpt-lean.md").read_bytes()
+    astra = (root / "examples" / "gpt-astra.md").read_bytes()
+    overlay = (root / "examples" / "gpt-overlay.md").read_bytes()
+
+    assert (
+        hashlib.sha256(unrestricted).hexdigest() == EXPECTED_UNRESTRICTED_SHA256
+    )
+    assert (
+        hashlib.sha256(unrestricted).hexdigest()
+        == EXPECTED_UNRESTRICTED_SHA256
+    )
+    assert (
+        hashlib.sha256(contract).hexdigest() == EXPECTED_CONTRACT_SHA256
+    )
+    assert (
+        hashlib.sha256(persona_contract).hexdigest()
+        == EXPECTED_PERSONA_CONTRACT_SHA256
+    )
+    assert hashlib.sha256(lean).hexdigest() == EXPECTED_LEAN_SHA256
+    assert hashlib.sha256(astra).hexdigest() == EXPECTED_ASTRA_SHA256
+    assert hashlib.sha256(overlay).hexdigest() == EXPECTED_OVERLAY_SHA256
+    assert (
+        codex_instruct.BUILTIN_GPT_UNRESTRICTED_MD.encode("utf-8") == unrestricted
+    )
+    assert codex_instruct.BUILTIN_GPT_CONTRACT_MD.encode("utf-8") == contract
+    assert (
+        codex_instruct.BUILTIN_GPT_PERSONA_CONTRACT_MD.encode("utf-8")
+        == persona_contract
+    )
+    assert codex_instruct.BUILTIN_GPT_ASTRA_MD.encode("utf-8") == astra
+    assert codex_instruct.BUILTIN_GPT_OVERLAY_MD.encode("utf-8") == overlay
+    assert "BEGIN." in codex_instruct.BUILTIN_GPT_OVERLAY_MD
+    assert "EXECUTION (baseline behavior, unchanged by this overlay):" in (
+        codex_instruct.BUILTIN_GPT_OVERLAY_MD
+    )
+    assert 80 <= len(codex_instruct.BUILTIN_GPT_CONTRACT_MD.splitlines()) <= 120
+    assert "BEGIN." in codex_instruct.BUILTIN_GPT_CONTRACT_MD
+    assert "BEGIN." in codex_instruct.BUILTIN_GPT_PERSONA_CONTRACT_MD
+    # Delivery-engine obligations absorbed from the layered contract.
+    contract_text = codex_instruct.BUILTIN_GPT_CONTRACT_MD
+    for section in ("Delivery engine:", "Verify:", "Attack the weak points:", "Land the result:"):
+        assert section in contract_text
+    # Layered-contract specific sections.
+    persona_text = codex_instruct.BUILTIN_GPT_PERSONA_CONTRACT_MD
+    for section in (
+        "Wrapper and payload:",
+        "Delivery engine:",
+        "Layer independence:",
+        "Never call unverified work verified",
+    ):
+        assert section in persona_text
+
+
+def test_default_dry_run_uses_overlay(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    expected_hash = hashlib.sha256(
+        codex_instruct.BUILTIN_GPT_OVERLAY_MD.encode("utf-8")
+    ).hexdigest()
+
+    result = _run("--codex-dir", codex_dir, "--dry-run")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "examples/gpt-overlay.md" in result.stdout
+    assert expected_hash in result.stdout
+    assert "gpt-overlay.md" in result.stdout
+    assert 'model_instructions_file = "./gpt-overlay.md"' in result.stdout
+    assert "hooks.json" in result.stdout
+    assert not (codex_dir / "gpt-overlay.md").exists()
+    assert not (codex_dir / "gpt-unrestricted.md").exists()
+    assert not (codex_dir / "gpt-contract.md").exists()
+
+
+def test_preset_overlay_matches_default_preview(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    default = _run("--codex-dir", codex_dir, "--dry-run", "--lang", "en")
+    explicit = _run(
+        "--codex-dir",
+        codex_dir,
+        "--preset",
+        "overlay",
+        "--dry-run",
+        "--lang",
+        "en",
+    )
+
+    assert default.returncode == 0
+    assert explicit.returncode == 0
+    assert "bundled examples/gpt-overlay.md" in default.stdout
+    assert "bundled examples/gpt-overlay.md" in explicit.stdout
+    assert 'model_instructions_file = "./gpt-overlay.md"' in default.stdout
+    assert 'model_instructions_file = "./gpt-overlay.md"' in explicit.stdout
+    assert default.stdout.split("SHA-256:", 1)[0] == explicit.stdout.split("SHA-256:", 1)[0]
+
+
+def test_preset_unrestricted_remains_compat_preview(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    result = _run(
+        "--codex-dir",
+        codex_dir,
+        "--preset",
+        "unrestricted",
+        "--dry-run",
+        "--lang",
+        "en",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "bundled examples/gpt-unrestricted.md" in result.stdout
+    assert 'model_instructions_file = "./gpt-unrestricted.md"' in result.stdout
+
+
+def test_preset_contract_dry_run_targets_gpt_contract(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    (codex_dir / "hooks.json").write_text("active hook\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(
+        codex_instruct.BUILTIN_GPT_CONTRACT_MD.encode("utf-8")
+    ).hexdigest()
+
+    result = _run("--codex-dir", codex_dir, "--preset", "contract", "--dry-run")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "examples/gpt-contract.md" in result.stdout
+    assert expected_hash in result.stdout
+    assert str(codex_dir / "gpt-contract.md") in result.stdout
+    assert 'model_instructions_file = "./gpt-contract.md"' in result.stdout
+    assert "将备份并隔离为" in result.stdout
+    assert str(codex_dir / "hooks.json.disabled") in result.stdout
+    assert not (codex_dir / "gpt-contract.md").exists()
+    assert (codex_dir / "config.toml").read_text(encoding="utf-8") == 'model = "gpt-5.6"\n'
+
+
+def test_preset_and_file_exits_2(tmp_path):
+    source = tmp_path / "custom.md"
+    source.write_text("custom prompt\n", encoding="utf-8")
+    result = _run("--file", source, "--preset", "contract", "--dry-run")
+
+    assert result.returncode == 2
+    assert "--preset" in result.stderr
+    assert "--file" in result.stderr
+
+
+def test_preset_contract_name_override(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    result = _run(
+        "--codex-dir",
+        codex_dir,
+        "--preset",
+        "contract",
+        "--name",
+        "my-rules",
+        "--dry-run",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(codex_dir / "my-rules.md") in result.stdout
+    assert 'model_instructions_file = "./my-rules.md"' in result.stdout
+
+
+def test_status_reports_unknown_custom_unrestricted_and_contract(tmp_path):
+    empty = _make_codex_dir(tmp_path, name="empty")
+    unknown = _run("--codex-dir", empty, "--status")
+    assert unknown.returncode == 0, unknown.stdout + unknown.stderr
+    assert "preset: unknown" in unknown.stdout
+
+    overlay = _make_codex_dir(tmp_path, name="overlay")
+    deployed = _run("--codex-dir", overlay, "--yes")
+    assert deployed.returncode == 0, deployed.stdout + deployed.stderr
+    status = _run("--codex-dir", overlay, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "preset: overlay" in status.stdout
+    assert "gpt-overlay.md: regular file" in status.stdout
+
+    custom = _make_codex_dir(tmp_path, name="custom")
+    source = tmp_path / "external.md"
+    source.write_text("not a bundled prompt\n", encoding="utf-8")
+    custom_deploy = _run(
+        "--codex-dir",
+        custom,
+        "--file",
+        source,
+        "--name",
+        "my-rules",
+        "--yes",
+    )
+    assert custom_deploy.returncode == 0, custom_deploy.stdout + custom_deploy.stderr
+    custom_status = _run("--codex-dir", custom, "--status")
+    assert custom_status.returncode == 0, custom_status.stdout + custom_status.stderr
+    assert "preset: custom" in custom_status.stdout
+    assert "my-rules.md: regular file" in custom_status.stdout
+
+
+def test_contract_preview_deploy_and_layer_uninstall(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    (codex_dir / "hooks.json").write_text("active hook\n", encoding="utf-8")
+
+    first = _run("--codex-dir", codex_dir, "--yes")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert (codex_dir / "gpt-overlay.md").exists()
+    first_manifest = json.loads(
+        (codex_dir / ".codex-keysmith-manifest.json").read_text(encoding="utf-8")
+    )
+    assert first_manifest["md"]["path"] == "gpt-overlay.md"
+
+    preview = _run("--codex-dir", codex_dir, "--preset", "contract", "--dry-run")
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert 'model_instructions_file = "./gpt-contract.md"' in preview.stdout
+    assert (codex_dir / "gpt-overlay.md").exists()
+    assert not (codex_dir / "gpt-contract.md").exists()
+
+    second = _run("--codex-dir", codex_dir, "--preset", "contract", "--yes")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert (codex_dir / "gpt-contract.md").read_text(encoding="utf-8") == (
+        codex_instruct.BUILTIN_GPT_CONTRACT_MD
+    )
+    assert (codex_dir / "gpt-overlay.md").exists()
+    config = (codex_dir / "config.toml").read_text(encoding="utf-8")
+    assert 'model_instructions_file = "./gpt-contract.md"' in config
+    status = _run("--codex-dir", codex_dir, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "preset: contract" in status.stdout
+    assert "gpt-contract.md: regular file" in status.stdout
+
+    uninstall = _run("--codex-dir", codex_dir, "--uninstall", "--yes")
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+    assert not (codex_dir / "gpt-contract.md").exists()
+    restored = (codex_dir / "config.toml").read_text(encoding="utf-8")
+    assert 'model_instructions_file = "./gpt-overlay.md"' in restored
+    assert (codex_dir / "gpt-overlay.md").exists()
+    after = _run("--codex-dir", codex_dir, "--status")
+    assert after.returncode == 0, after.stdout + after.stderr
+    assert "preset: overlay" in after.stdout
+
+
+def test_persona_contract_deploy_status_and_three_layer_uninstall(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+
+    first = _run("--codex-dir", codex_dir, "--yes")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert (codex_dir / "gpt-overlay.md").exists()
+
+    second = _run("--codex-dir", codex_dir, "--preset", "contract", "--yes")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert (codex_dir / "gpt-contract.md").exists()
+
+    third = _run(
+        "--codex-dir", codex_dir, "--preset", "persona-contract", "--yes"
+    )
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert (codex_dir / "gpt-persona-contract.md").read_text(encoding="utf-8") == (
+        codex_instruct.BUILTIN_GPT_PERSONA_CONTRACT_MD
+    )
+    config = (codex_dir / "config.toml").read_text(encoding="utf-8")
+    assert 'model_instructions_file = "./gpt-persona-contract.md"' in config
+    status = _run("--codex-dir", codex_dir, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "preset: persona-contract" in status.stdout
+    assert "gpt-persona-contract.md: regular file" in status.stdout
+
+    # Layered uninstall: persona-contract → contract → overlay.
+    uninstall_persona = _run("--codex-dir", codex_dir, "--uninstall", "--yes")
+    assert (
+        uninstall_persona.returncode == 0
+    ), uninstall_persona.stdout + uninstall_persona.stderr
+    assert not (codex_dir / "gpt-persona-contract.md").exists()
+    restored = (codex_dir / "config.toml").read_text(encoding="utf-8")
+    assert 'model_instructions_file = "./gpt-contract.md"' in restored
+    mid_status = _run("--codex-dir", codex_dir, "--status")
+    assert mid_status.returncode == 0, mid_status.stdout + mid_status.stderr
+    assert "preset: contract" in mid_status.stdout
+
+    uninstall_contract = _run("--codex-dir", codex_dir, "--uninstall", "--yes")
+    assert (
+        uninstall_contract.returncode == 0
+    ), uninstall_contract.stdout + uninstall_contract.stderr
+    assert not (codex_dir / "gpt-contract.md").exists()
+    base_status = _run("--codex-dir", codex_dir, "--status")
+    assert base_status.returncode == 0, base_status.stdout + base_status.stderr
+    assert "preset: overlay" in base_status.stdout
+
+
+def test_preset_persona_contract_dry_run_targets_gpt_persona_contract(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    (codex_dir / "hooks.json").write_text("active hook\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(
+        codex_instruct.BUILTIN_GPT_PERSONA_CONTRACT_MD.encode("utf-8")
+    ).hexdigest()
+
+    result = _run(
+        "--codex-dir", codex_dir, "--preset", "persona-contract", "--dry-run"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "examples/gpt-persona-contract.md" in result.stdout
+    assert expected_hash in result.stdout
+    assert str(codex_dir / "gpt-persona-contract.md") in result.stdout
+    assert 'model_instructions_file = "./gpt-persona-contract.md"' in result.stdout
+    assert "将备份并隔离为" in result.stdout
+    assert str(codex_dir / "hooks.json.disabled") in result.stdout
+    assert not (codex_dir / "gpt-persona-contract.md").exists()
+    assert (codex_dir / "config.toml").read_text(encoding="utf-8") == 'model = "gpt-5.6"\n'
+
+
+def test_preset_persona_contract_name_override(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    result = _run(
+        "--codex-dir",
+        codex_dir,
+        "--preset",
+        "persona-contract",
+        "--name",
+        "my-rules",
+        "--dry-run",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(codex_dir / "my-rules.md") in result.stdout
+    assert 'model_instructions_file = "./my-rules.md"' in result.stdout
+
+
+def test_preset_astra_dry_run_targets_gpt_astra(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    (codex_dir / "hooks.json").write_text("active hook\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(
+        codex_instruct.BUILTIN_GPT_ASTRA_MD.encode("utf-8")
+    ).hexdigest()
+
+    result = _run(
+        "--codex-dir", codex_dir, "--preset", "astra", "--dry-run"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "examples/gpt-astra.md" in result.stdout
+    assert expected_hash in result.stdout
+    assert str(codex_dir / "gpt-astra.md") in result.stdout
+    assert 'model_instructions_file = "./gpt-astra.md"' in result.stdout
+    assert not (codex_dir / "gpt-astra.md").exists()
+    assert (codex_dir / "config.toml").read_text(encoding="utf-8") == 'model = "gpt-5.6"\n'
+
+
+def test_preset_astra_name_override(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    result = _run(
+        "--codex-dir",
+        codex_dir,
+        "--preset",
+        "astra",
+        "--name",
+        "astra-rules",
+        "--dry-run",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert str(codex_dir / "astra-rules.md") in result.stdout
+    assert 'model_instructions_file = "./astra-rules.md"' in result.stdout
+
+
+def test_preset_astra_deploy_status_and_uninstall(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+
+    result = _run(
+        "--codex-dir", codex_dir, "--preset", "astra", "--yes"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    astra_path = codex_dir / "gpt-astra.md"
+    assert astra_path.is_file()
+    assert codex_instruct.BUILTIN_GPT_ASTRA_MD == astra_path.read_text(
+        encoding="utf-8"
+    )
+
+    status = _run("--codex-dir", codex_dir, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "preset: astra" in status.stdout
+
+    uninstall = _run("--codex-dir", codex_dir, "--uninstall", "--yes")
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+    assert not astra_path.exists()
+    assert 'model = "gpt-5.6"\n' == (codex_dir / "config.toml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_preset_astra_conflicts_with_file(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    result = _run(
+        "--codex-dir",
+        codex_dir,
+        "--preset",
+        "astra",
+        "--file",
+        "some.md",
+        "--dry-run",
+    )
+    assert result.returncode == 2
+
+
+def test_status_rejects_preset_flag(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+    result = _run("--codex-dir", codex_dir, "--status", "--preset", "contract")
+    assert result.returncode == 2
+
+
+def test_overlay_sha_classifies_without_manifest_preset():
+    sha256 = hashlib.sha256(
+        codex_instruct.BUILTIN_GPT_OVERLAY_MD.encode("utf-8")
+    ).hexdigest()
+    assert codex_instruct.bundled_preset_for_sha256(sha256) == "overlay"
+    assert (
+        codex_instruct.default_name_for_preset(codex_instruct.PRESET_OVERLAY)
+        == "gpt-overlay"
+    )
+    assert (
+        codex_instruct.default_name_for_preset(codex_instruct.PRESET_UNRESTRICTED)
+        == "gpt-unrestricted"
+    )
+
+
+def test_preset_overlay_deploy_status_and_uninstall(tmp_path):
+    codex_dir = _make_codex_dir(tmp_path)
+
+    result = _run("--codex-dir", codex_dir, "--preset", "overlay", "--yes")
+    assert result.returncode == 0, result.stdout + result.stderr
+    overlay_path = codex_dir / "gpt-overlay.md"
+    assert overlay_path.is_file()
+    assert codex_instruct.BUILTIN_GPT_OVERLAY_MD == overlay_path.read_text(
+        encoding="utf-8"
+    )
+
+    status = _run("--codex-dir", codex_dir, "--status")
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "preset: overlay" in status.stdout
+
+    uninstall = _run("--codex-dir", codex_dir, "--uninstall", "--yes")
+    assert uninstall.returncode == 0, uninstall.stdout + uninstall.stderr
+    assert not overlay_path.exists()
+    assert 'model = "gpt-5.6"\n' == (codex_dir / "config.toml").read_text(
+        encoding="utf-8"
+    )

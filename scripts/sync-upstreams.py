@@ -13,11 +13,11 @@ import tempfile
 UPSTREAMS = {
     "codex": (
         "https://github.com/Jia-Ethan/codex-keysmith.git",
-        "d7d53fb1ba2f754545c03d0e584adfc46d0a091b",
+        "f469195577bb3f9fb408ed9a496b29359ae6fe03",
     ),
     "claude": (
         "https://github.com/Jia-Ethan/claude-keysmith.git",
-        "eedde121d28117ff500915b05d27ff0245a4b26e",
+        "8b6a5748b0a3797bcca87e8781748946ead0dc51",
     ),
 }
 
