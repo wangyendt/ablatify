@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 import json
 import subprocess
 import sys
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -350,21 +353,34 @@ def test_deploy_does_not_change_provider_or_install_network_helper(tmp_path: Pat
     assert not (tmp_path / 'home' / 'Library').exists()
 
 
-def test_historical_codex_deployment_can_upgrade_and_uninstall(tmp_path: Path) -> None:
+@pytest.mark.parametrize('timestamp_resolution_ns', [1, 100])
+def test_historical_codex_deployment_can_upgrade_and_uninstall(
+    tmp_path: Path, timestamp_resolution_ns: int
+) -> None:
     import shutil
     codex = tmp_path / 'home' / '.codex'
     shutil.copytree(REPO_ROOT / 'tests' / 'fixtures' / 'codex-v0.2.0', codex)
-    manifest = json.loads((codex / '.codex-keysmith-manifest.json').read_text())
+    manifest_path = codex / '.codex-keysmith-manifest.json'
+    manifest = json.loads(manifest_path.read_text())
     for section in ('config', 'md'):
         entry = manifest[section]
-        path = codex / entry['path']
-        stamp = entry['after']['mtime_ns']
-        os.utime(path, ns=(stamp, stamp))
-        if entry.get('backup'):
-            path = codex / entry['backup']
-            stamp = entry['before']['mtime_ns']
+        for path_key, evidence_key in (('path', 'after'), ('backup', 'before')):
+            if not entry.get(path_key):
+                continue
+            path = codex / entry[path_key]
+            evidence = entry[evidence_key]
+            content = path.read_bytes()
+            assert len(content) == evidence['size']
+            assert hashlib.sha256(content).hexdigest() == evidence['sha256']
+            # Simulate Windows FILETIME precision even on macOS/Linux. Read
+            # back the actual timestamp rather than assuming os.utime is exact.
+            stamp = evidence['mtime_ns'] // timestamp_resolution_ns * timestamp_resolution_ns
             os.utime(path, ns=(stamp, stamp))
-    status = run_ablatify(tmp_path, 'status', 'codex', '--check')
+            evidence['mtime_ns'] = path.stat().st_mtime_ns
+    # Only temporary fixture metadata changes; historical bytes/hashes and the
+    # production ownership checks remain intact.
+    manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+    status = run_ablatify(tmp_path, 'status', 'codex', '--check', '--verbose')
     assert status.returncode == 0, status.stdout + status.stderr
     # First release had no overlay; exercise its genuine manifest and bytes.
     assert manifest['tool_version'] == '0.2.0'

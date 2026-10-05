@@ -24,7 +24,16 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  verify:
+    if: ${{ vars.AUTO_PUBLISH_NPM == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ inputs.expected_sha }}
+
   publish:
+    needs: verify
     if: ${{ vars.AUTO_PUBLISH_NPM == 'true' }}
     runs-on: ubuntu-latest
     steps:
