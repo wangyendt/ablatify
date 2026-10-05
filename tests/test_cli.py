@@ -386,3 +386,80 @@ def test_status_check_detects_claude_recovery_residue(tmp_path: Path) -> None:
     recovered = run_ablatify(tmp_path, 'recover', 'claude', '--format', 'json')
     assert recovered.returncode != 0
     assert residue.read_bytes() == before
+
+
+def test_codex_status_surfaces_instruction_diagnostics_read_only(tmp_path: Path) -> None:
+    codex_dir = tmp_path / 'home' / '.codex'
+    codex_dir.mkdir(parents=True)
+    (codex_dir / 'config.toml').write_text('model = "gpt-5"\n', encoding='utf-8')
+    deployed = run_ablatify(tmp_path, 'deploy', 'codex', '--yes')
+    assert deployed.returncode == 0, deployed.stdout + deployed.stderr
+    (codex_dir / 'AGENTS.md').write_text('Project style guide\n', encoding='utf-8')
+    before = {p.name: p.read_bytes() for p in codex_dir.iterdir() if p.is_file()}
+    result = run_ablatify(tmp_path, 'status', 'codex', '--format', 'json', '--check')
+    assert result.returncode == 0, result.stdout + result.stderr
+    details = json.loads(result.stdout)['results']['codex']['details']
+    assert details['instruction_slot'] == 'model_instructions_file'
+    assert details['preset'] == 'overlay'
+    assert details['competing_files'] == ['AGENTS.md']
+    assert 'current match' in details['measured_default']
+    text = run_ablatify(tmp_path, 'status', 'codex', '--lang', 'en')
+    assert 'Instruction slot:' in text.stdout
+    assert 'not a confirmed conflict' in text.stdout
+    assert before == {p.name: p.read_bytes() for p in codex_dir.iterdir() if p.is_file()}
+
+
+def test_claude_status_surfaces_context_without_enabling_agents(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv('CLAUDE_KEYSMITH_HOME', raising=False)
+    root = tmp_path / 'home' / '.claude'
+    (root / 'rules').mkdir(parents=True)
+    (root / 'rules' / 'style.md').write_text('Style guide\n', encoding='utf-8')
+    (root / 'MEMORY.md').write_text('Notes\n', encoding='utf-8')
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    result = run_ablatify(tmp_path, 'status', 'claude', '--format', 'json')
+    assert result.returncode == 0, result.stdout + result.stderr
+    context = json.loads(result.stdout)['results']['claude']['details']['competing_context']
+    assert context['extra_rules'] == ['style.md']
+    assert context['project_memory_md'] == [str(root / 'MEMORY.md')]
+    assert context['agents_carrier'] is False
+    assert context['host_upgrade_required'] is None
+    text = run_ablatify(tmp_path, 'status', 'claude', '--lang', 'zh-CN')
+    assert '额外配置线索（不代表冲突）: rules=1, MEMORY.md=1' in text.stdout
+    assert before == {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    help_result = run_ablatify(tmp_path, 'claude', '--', 'install', '--help')
+    assert '--agents' not in help_result.stdout
+
+
+def test_claude_project_context_detects_existing_agent_without_writes(tmp_path: Path) -> None:
+    root = tmp_path / '.claude'
+    (root / 'agents').mkdir(parents=True)
+    (root / 'agents' / 'keysmith.md').write_text('Existing agent\n', encoding='utf-8')
+    (root / 'MEMORY.md').write_text('Project notes\n', encoding='utf-8')
+    result = run_ablatify(tmp_path, 'status', 'claude', '--scope', 'project', '--project-dir', str(tmp_path), '--format', 'json')
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)['results']['claude']['details']['competing_context']
+    assert context['agents_carrier'] is True
+    assert context['project_memory_md'] == [str(root / 'MEMORY.md')]
+    assert not (root / 'keysmith').exists()
+
+
+def test_status_notes_cover_upgrade_and_nondefault_without_changing_health(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPO_ROOT / 'src'))
+    from ablatify.cli import _status_notes
+
+    details = {
+        'instruction_slot': 'model_instructions_file',
+        'preset': 'custom',
+        'measured_default': 'overlay (current preset=custom; switch to overlay or envelope-append)',
+        'competing_files': [],
+        'health': 'healthy',
+    }
+    before = dict(details)
+    assert any('differs' in note for note in _status_notes('codex', details, False))
+    assert any('不同' in note for note in _status_notes('codex', details, True))
+    assert details == before
+    claude = {'competing_context': {'host_upgrade_required': True, 'agents_carrier': True}}
+    assert 'Runtime configuration needs an upgrade' in _status_notes('claude', claude, False)
+    assert 'runtime 配置需要升级' in _status_notes('claude', claude, True)
+    assert _status_notes('claude', {}, False) == []
+    assert _status_notes('codex', {}, True) == []

@@ -215,3 +215,17 @@ rewriting, and background service installation are intentionally not bundled.
 Scenario/fixture resources are included, but are only deployed when explicitly
 requested. Some optional scenario packages support macOS/Linux only; the normal
 Ablatify CLI and the example fixture support Windows too.
+
+## Status diagnostics (October 2026)
+
+`ablatify status` reports Codex's instruction slot and preset, with a hint when
+another `AGENTS.md` is present. Claude status reports extra rules/MEMORY file
+counts and runtime upgrade hints when available (`--runtime` enables runtime
+inspection). These read-only observations do not confirm a conflict and do not
+change `status --check` health criteria. Use `--format json` for detailed fields
+or `--verbose` for the native status output.
+
+The October 2026 synchronization preserves the existing bundled prompts and does
+not add `--agents`, a GUI, or a network service. See [UPSTREAMS.md](UPSTREAMS.md)
+for exact snapshots and selective backports. The development-only HTTP regression
+runner requires an explicit `OPENAI_BASE_URL`; it has no fallback gateway.

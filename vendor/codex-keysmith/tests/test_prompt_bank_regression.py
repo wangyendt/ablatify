@@ -951,6 +951,7 @@ def test_http_extract_text_variants(prompt_bank_runner):
 
 
 def test_run_case_http_missing_auth(tmp_path, prompt_bank_runner, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("CODEX_KEYSMITH_AUTH", str(tmp_path / "nope.json"))
     rc, resp, err = prompt_bank_runner._run_case_http(
         "chat", "m", "prompt", {"input": "x", "timeout_seconds": 30}, []
@@ -1033,6 +1034,7 @@ def test_run_case_http_chat_and_messages_success(
 def test_run_case_http_classifier_block_and_errors(
     prompt_bank_runner, tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
     auth = tmp_path / "auth.json"
     auth.write_text(json.dumps({"OPENAI_API_KEY": "gg:secret"}), encoding="utf-8")
     monkeypatch.setenv("CODEX_KEYSMITH_AUTH", str(auth))
@@ -1084,3 +1086,22 @@ def test_main_rejects_missing_prompt_file(prompt_bank_runner, tmp_path, capsys):
     rc = prompt_bank_runner.main(["--validate-only", "--prompt-file", str(missing)])
     assert rc == 2
     assert "does not name a regular file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('base_url', [None, '', '   ', 'gateway.example', 'file:///tmp/gateway'])
+def test_http_requires_explicit_gateway_before_credentials_or_network(prompt_bank_runner, monkeypatch, base_url):
+    if base_url is None:
+        monkeypatch.delenv('OPENAI_BASE_URL', raising=False)
+    else:
+        monkeypatch.setenv('OPENAI_BASE_URL', base_url)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('missing/invalid gateway must stop before credentials or network access')
+
+    monkeypatch.setattr(Path, 'read_text', unexpected)
+    monkeypatch.setattr(prompt_bank_runner.urllib.request, 'urlopen', unexpected)
+    code, output, error = prompt_bank_runner._run_case_http('chat', 'test-model', 'test', {}, [])
+    assert code is None
+    assert output == ''
+    assert 'OPENAI_BASE_URL is required' in error
+    assert prompt_bank_runner.DEFAULT_GATEWAY == ''

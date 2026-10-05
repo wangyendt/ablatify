@@ -79,6 +79,14 @@ def _collect_status(
             else "unknown",
             "health": health_match.group(1) if health_match else "unknown",
         }
+        # The upstream Codex status protocol is text; parse only anchored fields.
+        for field in ("instruction_slot", "preset", "measured_default", "competing_files"):
+            match = re.search(r"^    " + field + r": ([^\r\n]*)$", codex.stdout, re.MULTILINE)
+            if match:
+                value = match.group(1).strip()
+                details[field] = (
+                    [] if value == "none" else value.split(", ")
+                ) if field == "competing_files" else value
         results["codex"] = ProviderResult(
             provider="codex",
             exitCode=codex.returncode,
@@ -168,6 +176,8 @@ def _status(
         else:
             state = "installed" if details.get("installed") is True else "not-installed"
         print("  {:<7} {:<18} {}".format(provider.title(), state, result.path))
+        for note in _status_notes(provider, details, chinese):
+            print("    " + note)
         if verbose:
             if result.stdout:
                 print(result.stdout.rstrip())
@@ -177,6 +187,35 @@ def _status(
     print("  ablatify deploy codex")
     print("  ablatify deploy claude")
     return 0 if successful and (installed or not check) else 1
+
+
+def _status_notes(provider: str, details: dict, chinese: bool) -> list[str]:
+    """Read-only diagnostic hints, not evidence of a conflict or runtime behavior."""
+    notes = []
+    if provider == "codex":
+        slot = details.get("instruction_slot")
+        if slot:
+            label = "指令位置" if chinese else "Instruction slot"
+            notes.append(f"{label}: {slot}; preset={details.get('preset', 'unknown')}")
+        files = details.get("competing_files", [])
+        if files:
+            label = "另有指令文件（不代表冲突）" if chinese else "Additional instructions (not a confirmed conflict)"
+            notes.append(f"{label}: {', '.join(files)}")
+        default = details.get("measured_default", "")
+        if "current preset=" in default:
+            notes.append("当前 preset 与上游默认 overlay 不同" if chinese else "Preset differs from the upstream overlay default")
+    else:
+        context = details.get("competing_context", {})
+        rules = context.get("extra_rules", [])
+        memory = context.get("project_memory_md", [])
+        if rules or memory:
+            label = "额外配置线索（不代表冲突）" if chinese else "Additional context (not a confirmed conflict)"
+            notes.append(f"{label}: rules={len(rules)}, MEMORY.md={len(memory)}")
+        if context.get("agents_carrier"):
+            notes.append("检测到既有 keysmith agent 文件" if chinese else "Existing keysmith agent file detected")
+        if context.get("host_upgrade_required"):
+            notes.append("runtime 配置需要升级" if chinese else "Runtime configuration needs an upgrade")
+    return notes
 
 
 def _operation_exit_code(results: dict[str, ProviderResult]) -> int:
