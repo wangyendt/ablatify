@@ -96,12 +96,63 @@ def test_deploy_all_yes_applies_each_provider_default_profile(tmp_path: Path) ->
     assert "<!-- claude-keysmith:start" in (claude_home / "CLAUDE.md").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_default_deploy_has_no_upstream_name_or_reply_marker(tmp_path: Path, provider: str) -> None:
+    home = tmp_path / "home"
+    if provider == "codex":
+        codex_dir = home / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "config.toml").write_text('model = "gpt-5"\n', encoding="utf-8")
+        deployed_file = codex_dir / "gpt-overlay.md"
+        example = REPO_ROOT / "vendor" / "codex-keysmith" / "examples" / "gpt-overlay.md"
+    else:
+        deployed_file = home / ".claude" / "keysmith" / "claude-project-rules.md"
+        example = REPO_ROOT / "vendor" / "claude-keysmith" / "examples" / "claude-project-rules.md"
+
+    result = run_ablatify(tmp_path, "deploy", provider, "--yes")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = deployed_file.read_text(encoding="utf-8")
+    assert content.strip() == example.read_text(encoding="utf-8").strip()
+    assert "Ethan" not in content
+    assert "[P]" not in content
+
+
 def test_noninteractive_deploy_without_yes_only_previews_and_prints_retry(tmp_path: Path) -> None:
     result = run_ablatify(tmp_path, "deploy", "claude")
 
     assert result.returncode == 0, result.stderr
     assert "ablatify deploy claude --yes" in result.stdout
     assert not (tmp_path / "home" / ".claude").exists()
+
+
+def test_default_redeploy_removes_previously_managed_personalization(tmp_path: Path) -> None:
+    codex_dir = tmp_path / "home" / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text('model = "gpt-5"\n', encoding="utf-8")
+    previous = tmp_path / "previous.md"
+    previous.write_text(
+        "The operator is Ethan. Address him as Ethan.\n"
+        "Every visible assistant reply begins with `[P]` on its own first line.\n",
+        encoding="utf-8",
+    )
+    deployed_files = [
+        codex_dir / "gpt-overlay.md",
+        tmp_path / "home" / ".claude" / "keysmith" / "claude-project-rules.md",
+    ]
+
+    installed = run_ablatify(tmp_path, "deploy", "all", "--file", str(previous), "--yes")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    for path in deployed_files:
+        # Explicit custom instructions remain untouched, even with a name/marker.
+        assert path.read_text(encoding="utf-8") == previous.read_text(encoding="utf-8")
+
+    updated = run_ablatify(tmp_path, "deploy", "all", "--yes")
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    for path in deployed_files:
+        content = path.read_text(encoding="utf-8")
+        assert "Ethan" not in content
+        assert "[P]" not in content
 
 
 def test_uninstall_all_yes_removes_the_default_global_profiles(tmp_path: Path) -> None:

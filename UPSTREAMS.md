@@ -13,6 +13,19 @@ managed-block markers for compatibility. Synchronization is maintainer-only;
 npm installation and CLI execution never fetch upstream code. Copyright and MIT
 license notices are preserved.
 
+## 2026-10-16 local default-template cleanup
+
+- Removed the upstream author's forced Ethan address and `[P]` reply marker
+  from the Codex overlay (both its embedded text and example file) and the
+  Claude default project rules. Codex's prescriptive template entries no longer
+  refer to the removed marker. Other prompt content and custom `--file` inputs
+  are unchanged; copyright and license attribution remain intact.
+- Public CLI regression tests deploy each provider into a temporary home,
+  check the deployed text matches the bundled example, and reject either
+  personalization. Preserve this local change when synchronizing upstream.
+- Existing installations require redeployment from the updated package;
+  this source change does not modify users' current configuration or sessions.
+
 ## 2026-10-05 selective synchronization
 
 - Codex: engine, preset tests, and development prompt-bank runner updated to the
